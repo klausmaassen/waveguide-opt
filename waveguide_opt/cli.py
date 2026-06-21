@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import time
 from pathlib import Path
 
 from .ath_config import write_cfg
@@ -68,6 +69,30 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8765)
 
+    p = sub.add_parser("optimize", help="CMA-ES optimisation (requires: pip install cma)")
+    p.add_argument("--max-evals", type=int, default=500)
+    p.add_argument("--seed", type=int, default=1)
+    p.add_argument("--sigma0", type=float, default=0.25)
+    p.add_argument("--output-dir", default=None, help="default: runs/circsym/web_cma_<timestamp>")
+    p.add_argument("--settings")
+    p.add_argument("--bounds-json", help="JSON file with bounds overrides, e.g. {\"coverage_angle\": [50, 65]}")
+    p.add_argument("--top", type=int, default=20, help="write CFG files for the top N candidates")
+
+    p = sub.add_parser("export-top", help="Select best candidates from a run dir and write ATH CFG files")
+    p.add_argument("--run-dir", required=True, help="directory containing web_candidates.json")
+    p.add_argument("--count", type=int, default=5)
+    p.add_argument("--diverse", action="store_true", default=True, help="greedy farthest-point selection (default)")
+    p.add_argument("--no-diverse", dest="diverse", action="store_false", help="pure top-N by score")
+    p.add_argument("--top-fraction", type=float, default=0.20, help="fraction of candidates forming the diversity pool")
+    p.add_argument("--output-dir", default=None, help="default: <run-dir>/export_top")
+    p.add_argument("--settings")
+
+    p = sub.add_parser("sensitivity", help="Finite-difference score sensitivity for each parameter")
+    p.add_argument("--candidate-json", help="JSON file with candidate parameters (omit to use defaults)")
+    p.add_argument("--name", default="start_40mm")
+    p.add_argument("--delta", type=float, default=0.10, help="step size as fraction of each parameter's range")
+    p.add_argument("--output", help="write results as JSON to this path")
+
     args = parser.parse_args(argv)
     if args.cmd == "target-table":
         rows = target_table()
@@ -126,3 +151,175 @@ def main(argv: list[str] | None = None) -> None:
         from .web_app import run
 
         run(args.host, args.port)
+
+    elif args.cmd == "optimize":
+        from .evaluation import DEFAULT_OBJECTIVE_WEIGHTS, candidate_row
+        from .models import Bounds
+        from .optimizer import SHAPE_PARAMS, optimize_cma
+
+        bounds = Bounds()
+        if args.bounds_json:
+            raw = json.loads(Path(args.bounds_json).read_text(encoding="utf-8"))
+            overrides = {k: tuple(v) for k, v in raw.items() if hasattr(Bounds(), k)}
+            bounds = Bounds(**{**{f: getattr(Bounds(), f) for f in Bounds().__dataclass_fields__}, **overrides})
+
+        settings = Settings.load(args.settings) if args.settings else Settings()
+        run_name = f"web_cma_{time.strftime('%Y%m%d_%H%M%S')}"
+        output_dir = Path(args.output_dir) if args.output_dir else Path("runs/circsym") / run_name
+        cfg_dir = output_dir / "configs"
+
+        t0 = time.time()
+        counts = [0]
+
+        def _progress(n: int, _c: object, score: float) -> None:
+            counts[0] = n
+            if n % 50 == 0 or n == 1:
+                print(f"  eval {n:4d}  score {score:.5f}  [{time.time() - t0:.0f}s]")
+
+        print(f"CMA-ES: max_evals={args.max_evals}  sigma0={args.sigma0}  seed={args.seed}")
+        candidates = optimize_cma(
+            bounds=bounds,
+            sigma0=args.sigma0,
+            max_evals=args.max_evals,
+            seed=args.seed,
+            progress_callback=_progress,
+        )
+        print(f"Done - {counts[0]} evaluations, {len(candidates)} valid candidates")
+
+        top = candidates[: args.top]
+        weights = DEFAULT_OBJECTIVE_WEIGHTS
+        rows = []
+        for rank, candidate in enumerate(top, 1):
+            candidate = candidate.__class__(name=f"cand_{rank:04d}", **{
+                p: getattr(candidate, p) for p in SHAPE_PARAMS + [
+                    "target_mouth_diameter", "mesh_length_segments",
+                    "mesh_throat_resolution", "mesh_mouth_resolution",
+                    "abec_f1", "abec_f2", "abec_num_frequencies",
+                    "polar_max_angle", "polar_points",
+                ]
+            })
+            cfg_path = cfg_dir / f"{candidate.name}.cfg"
+            write_cfg(candidate, cfg_path, output_root=settings.ath_output_root)
+            row = candidate_row(candidate, weights)
+            row["cfg_path"] = str(cfg_path)
+            rows.append(row)
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        json_path = output_dir / "web_candidates.json"
+        json_path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+
+        summary_fields = ["name"] + SHAPE_PARAMS + [
+            "estimated_mouth_diameter", "acoustic_score",
+            "constant_directivity", "ptt8_crossover_match",
+            "off_axis_smoothness", "response_ripple", "resonance_penalty",
+            "beamwidth_2000", "beamwidth_4000",
+        ]
+        summary_path = output_dir / "summary.csv"
+        with summary_path.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=summary_fields, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(rows)
+
+        print(f"Output: {output_dir}")
+        print(f"  CFG files : {cfg_dir}/ ({len(top)} files)")
+        print(f"  Summary   : {summary_path}")
+        print(f"  Web JSON  : {json_path}  (loadable in 'waveguide-opt ui')")
+        if rows:
+            best = rows[0]
+            print(f"Best: {best['name']}  score={best['acoustic_score']:.5f}"
+                  f"  mouth={best.get('estimated_mouth_diameter', 0):.1f} mm"
+                  f"  BW@2kHz={best.get('beamwidth_2000') or 0:.1f}°")
+
+    elif args.cmd == "export-top":
+        from .ath_config import write_cfg as _write_cfg
+        from .evaluation import candidate_from_row
+        from .optimizer import SHAPE_PARAMS, select_diverse
+
+        run_dir = Path(args.run_dir)
+        json_path = run_dir / "web_candidates.json"
+        if not json_path.exists():
+            raise SystemExit(f"web_candidates.json not found in {run_dir}")
+
+        rows = json.loads(json_path.read_text(encoding="utf-8"))
+        if not rows:
+            raise SystemExit("No candidates in run dir")
+
+        if args.diverse:
+            selected = select_diverse(rows, args.count, args.top_fraction)
+        else:
+            selected = sorted(rows, key=lambda r: float(r.get("pre_score", float("inf"))))[: args.count]
+
+        settings = Settings.load(args.settings) if args.settings else Settings()
+        output_dir = Path(args.output_dir) if args.output_dir else run_dir / "export_top"
+        cfg_dir = output_dir / "configs"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        for row in selected:
+            candidate = candidate_from_row(row)
+            _write_cfg(candidate, cfg_dir / f"{candidate.name}.cfg", output_root=settings.ath_output_root)
+
+        summary_fields = ["name"] + SHAPE_PARAMS + [
+            "estimated_mouth_diameter", "acoustic_score",
+            "constant_directivity", "ptt8_crossover_match",
+            "off_axis_smoothness", "response_ripple", "resonance_penalty",
+            "beamwidth_2000", "beamwidth_4000",
+        ]
+        summary_path = output_dir / "summary.csv"
+        with summary_path.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=summary_fields, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(selected)
+
+        readme_lines = [
+            f"Export from : {run_dir}",
+            f"Selection   : {'diverse top' if args.diverse else 'top'} {len(selected)} of {len(rows)} candidates",
+            f"Pool        : top {args.top_fraction:.0%} by score",
+            "",
+            "Candidates (sorted by score):",
+        ]
+        for i, row in enumerate(selected, 1):
+            score = row.get("acoustic_score", row.get("pre_score", "?"))
+            mouth = row.get("estimated_mouth_diameter", 0)
+            bw2 = row.get("beamwidth_2000") or 0
+            bw4 = row.get("beamwidth_4000") or 0
+            score_str = f"{score:.4f}" if isinstance(score, float) else str(score)
+            readme_lines.append(
+                f"  {i}. {row['name']:16s}  score={score_str}  mouth={mouth:.1f}mm"
+                f"  BW@2kHz={bw2:.1f}°  BW@4kHz={bw4:.1f}°"
+            )
+        readme_lines += [
+            "",
+            "Next steps:",
+            "  1. Run ATH with each .cfg file in configs/",
+            "  2. Open the generated ABEC project",
+            "  3. Run ABEC simulation",
+            "  4. Compare ABEC polar results against summary.csv scores",
+        ]
+        (output_dir / "README.txt").write_text("\n".join(readme_lines), encoding="utf-8")
+
+        print(f"Exported {len(selected)} candidates to {output_dir}")
+        print(f"  CFG files : {cfg_dir}/")
+        print(f"  Summary   : {summary_path}")
+        print(f"  README    : {output_dir / 'README.txt'}")
+
+    elif args.cmd == "sensitivity":
+        from .optimizer import sensitivity_analysis
+
+        candidate = _candidate_from_json(args.candidate_json, args.name)
+        results = sensitivity_analysis(candidate, delta=args.delta)
+
+        if args.output:
+            out = Path(args.output)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(json.dumps(results, indent=2), encoding="utf-8")
+            print(f"wrote {out}")
+        else:
+            print(f"Sensitivity for '{candidate.name}'  (delta={args.delta:.0%} of each parameter's range)\n")
+            print(f"  {'Parameter':<22} {'Base':>9} {'Score-':>9} {'Score0':>9} {'Score+':>9} {'Sensitivity':>12}")
+            print("  " + "-" * 74)
+            for r in results:
+                print(
+                    f"  {r['parameter']:<22} {r['base_value']:>9.4f}"
+                    f" {r['score_minus']:>9.5f} {r['score_base']:>9.5f} {r['score_plus']:>9.5f}"
+                    f" {r['sensitivity']:>12.5f}"
+                )
