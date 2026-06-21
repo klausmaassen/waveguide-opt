@@ -1,0 +1,5 @@
+[project]
+name = "waveguide-opt"
+version = "0.1.0"
+description = "ATH/ABEC automation helpers for T34B + PTT8 waveguide optimization"
+requires-python = ">=3.11"

@@ -1,0 +1,8 @@
+{
+  "ath_exe": "C:/ATH/ath.exe",
+  "ath_workdir": "C:/ATH",
+  "abec_exe": "C:/ABEC/abec.exe",
+  "abec_workdir": "C:/ABEC",
+  "ptt8_zip": "C:/Users/klaus/Downloads/PTT8.0X04-NAB-01 - Frequency Response & Impedance Data",
+  "ath_output_root": "C:/Users/klaus/Documents/Codex/Waveguide_Opt/runs/ath_output"
+}

@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local settings (contain machine-specific paths)
+settings.local.json
+
+# Run outputs (large generated files)
+runs/*/
+!runs/circsym/.gitkeep
+!runs/full3d/.gitkeep
+
+# ATH/ABEC outputs
+runs/ath_output/
+
+# Data files
+data/ptt8/*.csv
+data/t34b/
+
+# Results
+results/plots/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
