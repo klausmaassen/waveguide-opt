@@ -13,7 +13,7 @@ from .ath_config import write_cfg
 from .evaluation import DEFAULT_OBJECTIVE_WEIGHTS, candidate_row, preview_from_row
 from .geometry import candidate_preview
 from .models import Bounds, Candidate, Settings
-from .optimizer import sample_candidates
+from .optimizer import optimize_cma, sample_candidates
 from .run_abec import run_abec
 from .run_ath import run_ath
 
@@ -249,12 +249,21 @@ class Handler(SimpleHTTPRequestHandler):
             self._json({"ok": False, "error": "job already running"}, 409)
             return
         seed = int(payload.get("seed", 1))
-        run_ath_enabled = bool(payload.get("runAth", False))
-        max_count = 500 if run_ath_enabled else 5000
-        count = max(1, min(int(payload.get("count", 50)), max_count))
         bounds = _bounds_from_payload(payload)
         weights = _weights_from_payload(payload)
-        thread = threading.Thread(target=_run_job, args=(count, seed, run_ath_enabled, bounds, weights), daemon=True)
+        mode = str(payload.get("mode", "sample"))
+        if mode == "cma":
+            max_evals = max(50, min(int(payload.get("count", 500)), 2000))
+            thread = threading.Thread(
+                target=_run_job_cma, args=(max_evals, seed, bounds, weights), daemon=True
+            )
+        else:
+            run_ath_enabled = bool(payload.get("runAth", False))
+            max_count = 500 if run_ath_enabled else 5000
+            count = max(1, min(int(payload.get("count", 50)), max_count))
+            thread = threading.Thread(
+                target=_run_job, args=(count, seed, run_ath_enabled, bounds, weights), daemon=True
+            )
         APP_STATE.thread = thread
         thread.start()
         self._json({"ok": True})
@@ -314,6 +323,98 @@ class Handler(SimpleHTTPRequestHandler):
         subprocess.Popen(["explorer.exe", f"/select,{project}"])
         APP_STATE.log(f"opened folder for {project.name}")
         self._json({"ok": True, "project": str(project)})
+
+
+def _run_job_cma(max_evals: int, seed: int, bounds: Bounds, weights: dict[str, float]) -> None:
+    from dataclasses import replace as _dc_replace
+
+    run_name = time.strftime("web_cma_%Y%m%d_%H%M%S")
+    run_dir = ROOT / "runs" / "circsym" / run_name
+    cfg_dir = run_dir / "configs"
+    settings = _load_settings()
+    ath_output_root = str(Path(settings.ath_output_root) / run_name)
+
+    APP_STATE.update(
+        running=True, phase="CMA-ES",
+        progress=0, total=max_evals,
+        run_dir=str(run_dir), candidates=[], stop_requested=False,
+    )
+    APP_STATE.log(f"CMA-ES gestartet: {run_name}  max_evals={max_evals}  seed={seed}")
+    APP_STATE.log("Gewichte: " + ", ".join(f"{k}={v:.2f}" for k, v in weights.items()))
+
+    try:
+        partial: list[tuple[float, Any]] = []
+        best_score = [float("inf")]
+
+        class _Stop(Exception):
+            pass
+
+        def _progress(n: int, candidate: Any, score: float) -> None:
+            partial.append((score, candidate))
+            APP_STATE.update(progress=n)
+            if APP_STATE.snapshot().get("stop_requested"):
+                raise _Stop()
+            if score < best_score[0]:
+                best_score[0] = score
+                row = candidate_row(candidate, weights)
+                run_dir.mkdir(parents=True, exist_ok=True)
+                cfg_path = cfg_dir / f"{candidate.name}.cfg"
+                write_cfg(candidate, cfg_path, output_root=ath_output_root)
+                row["cfg_path"] = str(cfg_path)
+                row["ath_output_root"] = ath_output_root
+                APP_STATE.update(best=preview_from_row(row))
+                APP_STATE.log(f"neues Beste: {candidate.name}  score={score:.5f}")
+
+        try:
+            candidates = optimize_cma(
+                bounds=bounds, max_evals=max_evals,
+                seed=seed, weights=weights,
+                progress_callback=_progress,
+            )
+        except _Stop:
+            APP_STATE.log("Stop empfangen – speichere Zwischenstand")
+            mouth_lo, mouth_hi = bounds.target_mouth_diameter
+            partial.sort(key=lambda t: t[0])
+            seen: set[str] = set()
+            candidates = []
+            for _, c in partial:
+                if not (mouth_lo <= estimated_mouth_diameter(c) <= mouth_hi):
+                    continue
+                key = f"{c.length:.1f}_{c.coverage_angle:.1f}_{c.os_k:.3f}"
+                if key not in seen:
+                    seen.add(key)
+                    candidates.append(c)
+
+        rows: list[dict[str, Any]] = []
+        best_row: dict[str, Any] | None = None
+        for rank, c in enumerate(candidates[:50], 1):
+            renamed = _dc_replace(c, name=f"cand_{rank:04d}")
+            cfg_path = cfg_dir / f"{renamed.name}.cfg"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            write_cfg(renamed, cfg_path, output_root=ath_output_root)
+            row = candidate_row(renamed, weights)
+            row["cfg_path"] = str(cfg_path)
+            row["ath_output_root"] = ath_output_root
+            rows.append(row)
+
+        if rows:
+            best_row = rows[0]
+            APP_STATE.update(best=preview_from_row(best_row))
+            APP_STATE.log(
+                f"Fertig: {best_row['name']}  score={best_row['pre_score']:.5f}"
+                f"  Mund={best_row.get('estimated_mouth_diameter', 0):.1f} mm"
+            )
+
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "web_candidates.json").write_text(json.dumps(rows, indent=2), encoding="utf-8")
+        APP_STATE.update(
+            running=False, phase="complete",
+            total=max_evals, progress=len(partial),
+            candidates=_visible_rows(rows, best_row),
+        )
+    except Exception as exc:
+        APP_STATE.log(f"Fehler: {exc}")
+        APP_STATE.update(running=False, phase="error")
 
 
 def run(host: str = "127.0.0.1", port: int = 8765) -> None:
