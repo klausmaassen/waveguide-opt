@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Waveguide Opt</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <section class="topbar">
+        <div>
+          <h1>Waveguide Opt</h1>
+          <p>T34B + PTT8 akustische Optimierung</p>
+        </div>
+        <div class="status-pill" id="phase">idle</div>
+      </section>
+
+      <section class="workspace">
+        <aside class="panel controls">
+          <h2>Prozess</h2>
+          <label>
+            <span id="countLabel">Kandidaten</span>
+            <input id="count" type="number" min="1" max="5000" value="500" />
+          </label>
+          <label>
+            Seed
+            <input id="seed" type="number" value="1" />
+          </label>
+          <label class="check" style="margin: 4px 0 10px">
+            <input id="useCma" type="checkbox" />
+            <span>CMA-ES verwenden</span>
+          </label>
+          <div class="buttons">
+            <button id="startBtn" class="primary">Start</button>
+            <button id="stopBtn">Stop</button>
+          </div>
+          <div class="notice" id="notice"></div>
+          <div class="progress">
+            <div class="progress-row">
+              <span id="progressText">0 / 0</span>
+              <span id="runDir"></span>
+            </div>
+            <div class="bar"><span id="bar"></span></div>
+          </div>
+
+          <h2>Optimierungsziel</h2>
+          <div class="objective">
+            <div class="objective-row">
+              <span>Rangfolge</span>
+              <strong>akustischer Score</strong>
+            </div>
+            <div class="objective-row">
+              <span>CD</span>
+              <strong>konstante Directivity</strong>
+            </div>
+            <div class="objective-row">
+              <span>PTT8</span>
+              <strong>Crossover-Match</strong>
+            </div>
+            <div class="objective-row">
+              <span>Off-axis</span>
+              <strong>glatte Winkelkurven</strong>
+            </div>
+            <div class="objective-row">
+              <span>Ripple</span>
+              <strong>wenig Resonanzen</strong>
+            </div>
+            <div class="objective-row">
+              <span>Modell</span>
+              <strong>axisym. Fast-BEM</strong>
+            </div>
+            <p>Geometrie wirkt nur als Parametergrenze. Bempp-cl bleibt als spaetere Top-N-Validierung vorgesehen.</p>
+          </div>
+
+          <h2>Gewichtung</h2>
+          <div class="weights-wrap">
+            <table class="weights-table">
+              <tbody id="weightRows"></tbody>
+            </table>
+          </div>
+
+          <h2>Parametergrenzen</h2>
+          <div class="bounds-wrap">
+            <table class="bounds-table">
+              <thead>
+                <tr>
+                  <th>Parameter</th>
+                  <th>Min</th>
+                  <th>Max</th>
+                </tr>
+              </thead>
+              <tbody id="boundsRows"></tbody>
+            </table>
+          </div>
+
+          <h2>Beste Loesung</h2>
+          <dl class="metrics" id="metrics"></dl>
+        </aside>
+
+        <section class="mainview">
+          <div class="visual-row">
+            <div class="visual acoustic-visual">
+              <div class="visual-head">
+                <h2>Akustische Auswertung</h2>
+                <span>beste Loesung</span>
+              </div>
+              <canvas id="acousticCanvas" width="760" height="560"></canvas>
+            </div>
+
+            <div class="visual geometry-visual">
+              <div class="visual-head">
+                <h2>Waveguide-Geometrie</h2>
+                <span id="bestName">start_40mm</span>
+              </div>
+              <canvas id="profileCanvas" width="1100" height="560"></canvas>
+            </div>
+          </div>
+
+          <div class="grid2">
+            <section class="panel">
+              <h2>Kandidaten</h2>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Score</th>
+                      <th>CD</th>
+                      <th>PTT8</th>
+                      <th>Ripple</th>
+                      <th>Hals</th>
+                      <th>Tiefe</th>
+                      <th>BW 2k</th>
+                    </tr>
+                  </thead>
+                  <tbody id="candidateRows"></tbody>
+                </table>
+              </div>
+            </section>
+            <section class="panel">
+              <h2>Log</h2>
+              <pre id="log"></pre>
+            </section>
+          </div>
+        </section>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>
